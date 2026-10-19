@@ -15,7 +15,8 @@ const GLB_MAGIC := 0x46546C67
 const CHUNK_JSON := 0x4E4F534A
 const CHUNK_BIN := 0x004E4942
 
-# skintokens role -> VRM 1.0 humanBones name.
+# skintokens role -> VRM 1.0 humanBones name. Finger roles (<side>_<finger>_<1..3>, base to tip)
+# are optional; a rig that names them gets VRM finger bones.
 const VRM_BONES := {
 	"hips": "hips",
 	"spine1": "spine",
@@ -39,6 +40,36 @@ const VRM_BONES := {
 	"right_shin": "rightLowerLeg",
 	"right_foot": "rightFoot",
 	"right_toe": "rightToes",
+	"left_thumb_1": "leftThumbMetacarpal",
+	"left_thumb_2": "leftThumbProximal",
+	"left_thumb_3": "leftThumbDistal",
+	"left_index_1": "leftIndexProximal",
+	"left_index_2": "leftIndexIntermediate",
+	"left_index_3": "leftIndexDistal",
+	"left_middle_1": "leftMiddleProximal",
+	"left_middle_2": "leftMiddleIntermediate",
+	"left_middle_3": "leftMiddleDistal",
+	"left_ring_1": "leftRingProximal",
+	"left_ring_2": "leftRingIntermediate",
+	"left_ring_3": "leftRingDistal",
+	"left_little_1": "leftLittleProximal",
+	"left_little_2": "leftLittleIntermediate",
+	"left_little_3": "leftLittleDistal",
+	"right_thumb_1": "rightThumbMetacarpal",
+	"right_thumb_2": "rightThumbProximal",
+	"right_thumb_3": "rightThumbDistal",
+	"right_index_1": "rightIndexProximal",
+	"right_index_2": "rightIndexIntermediate",
+	"right_index_3": "rightIndexDistal",
+	"right_middle_1": "rightMiddleProximal",
+	"right_middle_2": "rightMiddleIntermediate",
+	"right_middle_3": "rightMiddleDistal",
+	"right_ring_1": "rightRingProximal",
+	"right_ring_2": "rightRingIntermediate",
+	"right_ring_3": "rightRingDistal",
+	"right_little_1": "rightLittleProximal",
+	"right_little_2": "rightLittleIntermediate",
+	"right_little_3": "rightLittleDistal",
 }
 const REQUIRED := ["hips", "spine", "head", "leftUpperArm", "leftLowerArm", "leftHand",
 	"rightUpperArm", "rightLowerArm", "rightHand", "leftUpperLeg", "leftLowerLeg", "leftFoot",

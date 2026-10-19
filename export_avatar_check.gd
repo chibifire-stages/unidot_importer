@@ -55,6 +55,11 @@ func _initialize() -> void:
 		var guid: String = pkg.read_guid_from_meta_file(asset.metadata_tar_header.get_stringfile())
 		expect(guid == asset.guid, "%s: meta guid %s, folder %s" % [path, guid, asset.guid])
 		expect(asset.parsed_meta != null, "Unidot parsed no meta for " + path)
+		if path.ends_with(".png") or path.ends_with(".jpg"):
+			var head: PackedByteArray = asset.asset_tar_header.get_data().slice(0, 4)
+			expect(head == PackedByteArray([0x89, 0x50, 0x4E, 0x47]) or head.slice(0, 3) == PackedByteArray([0xFF, 0xD8, 0xFF]),
+				"%s is not a PNG or JPEG file" % path)
+			continue
 		if path.ends_with(".txt") or asset.parsed_meta == null:
 			continue
 		var parsed = asset.parsed_meta.parse_asset(asset.asset_tar_header.get_stringfile())

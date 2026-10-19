@@ -302,11 +302,16 @@ func build_nodes(gltf: Dictionary, name: String, skin_index: int) -> Array:
 	return [nodes, index_of, globals]
 
 
-func children_of(nodes: Array, i: int) -> Array:
+# Child indices of every node, in one pass (a scan per node is quadratic and runs out the
+# instruction budget on rigs with a few hundred bones).
+func children_lists(nodes: Array) -> Array:
 	var out := []
 	for k in nodes.size():
-		if nodes[k]["parent"] == i:
-			out.append(k)
+		out.append([])
+	for k in nodes.size():
+		var p: int = nodes[k]["parent"]
+		if p >= 0:
+			out[p].append(k)
 	return out
 
 
@@ -501,7 +506,8 @@ func to_srgb(c: float) -> float:
 	return 1.055 * pow(c, 1.0 / 2.4) - 0.055
 
 
-func material_yaml(m: Dictionary) -> String:
+# tex_guid: GUID of the base colour texture asset, or "" for none.
+func material_yaml(m: Dictionary, tex_guid: String) -> String:
 	var pbr: Dictionary = m.get("pbrMetallicRoughness", {})
 	var c: Array = pbr.get("baseColorFactor", [1, 1, 1, 1])
 	var col := "{r: %s, g: %s, b: %s, a: %s}" % [f(to_srgb(c[0])), f(to_srgb(c[1])), f(to_srgb(c[2])), f(c[3])]
@@ -511,7 +517,12 @@ func material_yaml(m: Dictionary) -> String:
 	s += "  m_Parent: {fileID: 0}\n  m_ModifiedSerializedProperties: 0\n  m_ValidKeywords: []\n"
 	s += "  m_InvalidKeywords: []\n  m_LightmapFlags: 4\n  m_EnableInstancingVariants: 0\n"
 	s += "  m_DoubleSidedGI: 0\n  m_CustomRenderQueue: -1\n  stringTagMap: {}\n  disabledShaderPasses: []\n"
-	s += "  m_LockedProperties: \n  m_SavedProperties:\n    serializedVersion: 3\n    m_TexEnvs: []\n"
+	s += "  m_LockedProperties: \n  m_SavedProperties:\n    serializedVersion: 3\n"
+	if tex_guid == "":
+		s += "    m_TexEnvs: []\n"
+	else:
+		s += ("    m_TexEnvs:\n    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: %s, type: 3}\n"
+			+ "        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n") % tex_guid
 	s += "    m_Ints: []\n    m_Floats:\n    - _Glossiness: %s\n    - _Metallic: %s\n" % [
 		f(1.0 - float(pbr.get("roughnessFactor", 1.0))), f(float(pbr.get("metallicFactor", 1.0)))]
 	s += "    - _Mode: 0\n    - _SrcBlend: 1\n    - _DstBlend: 0\n    - _ZWrite: 1\n"
@@ -750,6 +761,7 @@ func prefab_yaml(nodes: Array, mesh: Dictionary, guids: Dictionary, materials: A
 	var anim_id := file_id("animator", "")
 	var desc_id := file_id("descriptor", "")
 	var s := HEADER
+	var kids_of := children_lists(nodes)
 	for i in nodes.size():
 		var n: Dictionary = nodes[i]
 		var comps := "  - component: %s\n" % ref(tr[i])
@@ -762,7 +774,7 @@ func prefab_yaml(nodes: Array, mesh: Dictionary, guids: Dictionary, materials: A
 			+ "  m_Component:\n%s  m_Layer: 0\n  m_Name: %s\n  m_TagString: Untagged\n  m_Icon: {fileID: 0}\n"
 			+ "  m_NavMeshLayer: 0\n  m_StaticEditorFlags: 0\n  m_IsActive: 1\n") % [go[i], comps, n["name"]]
 		var kids := ""
-		for c in children_of(nodes, i):
+		for c in kids_of[i]:
 			kids += "\n  - " + ref(tr[c])
 		var l: Transform3D = n["local"]
 		s += ("--- !u!4 &%d\nTransform:\n  m_ObjectHideFlags: 0\n  m_CorrespondingSourceObject: {fileID: 0}\n"
@@ -928,13 +940,40 @@ func native_package(vrm: PackedByteArray, name: String, view: Vector3, credits: 
 	var tar := PackedByteArray()
 	add(tar, dir, PackedByteArray(), folder_meta(guid_for(dir)), true)
 	add(tar, dir + "/Materials", PackedByteArray(), folder_meta(guid_for(dir + "/Materials")), true)
+	# Base colour images, written as the source files (PNG/JPEG) beside the materials.
+	var gtex: Array = gltf.get("textures", [])
+	var gimg: Array = gltf.get("images", [])
+	var tex_of := {}
+	var written := {}
+	for m in materials:
+		var md: Dictionary = gmats[m] if m < gmats.size() else {}
+		var t := int(md.get("pbrMetallicRoughness", {}).get("baseColorTexture", {}).get("index", -1))
+		if t < 0 or t >= gtex.size() or not gtex[t].has("source"):
+			continue
+		var im := int(gtex[t]["source"])
+		if im >= gimg.size() or not gimg[im].has("bufferView"):
+			continue
+		if not written.has(im):
+			var ext := ".jpg" if str(gimg[im].get("mimeType", "")) == "image/jpeg" else ".png"
+			var stem := str(gimg[im].get("name", ""))
+			if stem == "":
+				stem = str(md.get("name", "Texture%d" % im))
+			var tpath := dir + "/Textures/" + stem.validate_filename() + ext
+			var bv: Dictionary = gltf["bufferViews"][int(gimg[im]["bufferView"])]
+			var off := int(bv.get("byteOffset", 0))
+			if written.is_empty():
+				add(tar, dir + "/Textures", PackedByteArray(), folder_meta(guid_for(dir + "/Textures")), true)
+			add(tar, tpath, bin.slice(off, off + int(bv["byteLength"])),
+				importer_meta(guid_for(tpath), "TextureImporter", 2800000), false)
+			written[im] = guid_for(tpath)
+		tex_of[m] = written[im]
 	add(tar, paths["mesh"], mesh_yaml(mesh, name, materials).to_utf8_buffer(),
 		importer_meta(guids["mesh"], "NativeFormatImporter", 4300000), false)
 	add(tar, paths["avatar"], avatar_yaml(nodes, human).to_utf8_buffer(),
 		importer_meta(guids["avatar"], "NativeFormatImporter", 9000000), false)
 	for m in materials:
 		var md: Dictionary = gmats[m] if m < gmats.size() else {}
-		add(tar, mat_paths[m], material_yaml(md).to_utf8_buffer(),
+		add(tar, mat_paths[m], material_yaml(md, str(tex_of.get(m, ""))).to_utf8_buffer(),
 			importer_meta(guids["mat%d" % m], "NativeFormatImporter", 2100000), false)
 	add(tar, paths["prefab"], prefab_yaml(nodes, mesh, guids, materials, view, index_of).to_utf8_buffer(),
 		importer_meta(guid_for(paths["prefab"]), "PrefabImporter", 0), false)

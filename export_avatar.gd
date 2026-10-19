@@ -5,6 +5,7 @@
 #   godot --path <project> --script res://addons/unidot_importer/export_avatar.gd -- \
 #     --glb=<in.glb> --out=<out.unitypackage> --name=<Identifier> --skintokens=<skintokens.elf> \
 #     [--weights=<GGUF dir>] [--rigged=<rigged.glb> --roles=<roles.json>] [--keep=<dir>]
+#     [--rig-credit=<text>]  (CREDITS.txt rig line, e.g. "Rig from the source model")
 # The project needs addons/godot_sandbox (a double-precision build) and this add-on at
 # addons/unidot_importer. Rigging runs skintokens.elf on a local RenderingDevice, so run it in a
 # window; with --rigged and --roles it is skipped and the run can be headless.
@@ -135,9 +136,10 @@ func _meta_from_extras(extras: Dictionary) -> Dictionary:
 
 
 func _credits(extras: Dictionary) -> String:
-	return ("%s\nby %s\n%s\nLicence: %s\n\nRigged by SkinTokens (skintokens.elf) and converted by "
-		+ "unidot_importer's avatar export.\n") % [extras.get("title", _a.name),
-		extras.get("author", "Unknown"), extras.get("source", ""), extras.get("license", "")]
+	var rig: String = _a.get("rig-credit", "Rigged by SkinTokens (skintokens.elf)")
+	return ("%s\nby %s\n%s\nLicence: %s\n\n%s and converted by unidot_importer's avatar export.\n") % [
+		extras.get("title", _a.name), extras.get("author", "Unknown"), extras.get("source", ""),
+		extras.get("license", ""), rig]
 
 
 func _new_sb() -> void:
