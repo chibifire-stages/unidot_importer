@@ -1,0 +1,73 @@
+// Measurement for com_physics.py. Copy it as OneJoint.cs into an Editor folder of a project that holds a
+// humanoid avatar the engine built itself, then run
+//   <editor> -batchmode -nographics -projectPath <project> -executeMethod OneJoint.Run
+// with ONEJOINT_PREFAB=<asset path of the avatar>. Public API only: it sets every muscle to zero,
+// then moves one muscle at a time to a few values with the body position and rotation held fixed,
+// and records the world position of every humanoid bone. Output: onejoint.json.
+#if UNITY_EDITOR
+using System;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using UnityEditor;
+using UnityEngine;
+
+public static class OneJoint
+{
+	static string F(float v) => v.ToString("R", CultureInfo.InvariantCulture);
+
+	static string Snapshot(Animator a)
+	{
+		var sb = new StringBuilder("{");
+		bool first = true;
+		for (int b = 0; b < (int)HumanBodyBones.LastBone; b++)
+		{
+			var t = a.GetBoneTransform((HumanBodyBones)b);
+			if (t == null) continue;
+			var p = t.position;
+			sb.Append((first ? "" : ",") + "\"" + (HumanBodyBones)b + "\":[" + F(p.x) + "," + F(p.y) + "," + F(p.z) + "]");
+			first = false;
+		}
+		return sb.Append("}").ToString();
+	}
+
+	public static void Run()
+	{
+		var path = Environment.GetEnvironmentVariable("ONEJOINT_PREFAB");
+		var go = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(path));
+		go.transform.position = Vector3.zero;
+		var a = go.GetComponent<Animator>();
+		var h = new HumanPoseHandler(a.avatar, go.transform);
+		var p = new HumanPose();
+		h.GetHumanPose(ref p);
+		void Set(int muscle, float value)
+		{
+			for (int i = 0; i < p.muscles.Length; i++) p.muscles[i] = 0;
+			if (muscle >= 0) p.muscles[muscle] = value;
+			p.bodyPosition = new Vector3(0, 1, 0);
+			p.bodyRotation = Quaternion.identity;
+			h.SetHumanPose(ref p);
+		}
+		Set(-1, 0);
+		var sb = new StringBuilder("{\"prefab\":\"" + path + "\",\"scale\":" + F(a.humanScale) + ",\"zero\":" + Snapshot(a) + ",\"moves\":[");
+		bool first = true;
+		for (int b = 0; b < (int)HumanBodyBones.LastBone; b++)
+		{
+			if (a.GetBoneTransform((HumanBodyBones)b) == null) continue;
+			for (int dof = 0; dof < 3; dof++)
+			{
+				int m = HumanTrait.MuscleFromBone(b, dof);
+				if (m < 0) continue;
+				foreach (var value in new[] { -1f, -0.5f, 0.5f, 1f })
+				{
+					Set(m, value);
+					sb.Append((first ? "" : ",") + "{\"muscle\":\"" + HumanTrait.MuscleName[m] + "\",\"value\":" + F(value) + ",\"bones\":" + Snapshot(a) + "}");
+					first = false;
+				}
+			}
+		}
+		File.WriteAllText("onejoint.json", sb.Append("]}").ToString());
+		EditorApplication.Exit(0);
+	}
+}
+#endif
