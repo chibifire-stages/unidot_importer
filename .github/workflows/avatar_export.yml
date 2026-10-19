@@ -1,0 +1,27 @@
+name: Avatar export checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Centre-of-mass solve (synthetic data and a control that must fail)
+        run: |
+          pip install numpy
+          python3 test/humanoid_mass/solve.py --self-test
+      - name: Parse the export scripts with Godot 4.7.2
+        run: |
+          curl -sSLo godot.zip https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip
+          unzip -q godot.zip && rm godot.zip
+          sh test/check_export_scripts.sh "$PWD/Godot_v4.7.2-stable_linux.x86_64"

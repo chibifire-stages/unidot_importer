@@ -1,0 +1,304 @@
+# This file is part of Unidot Importer. See LICENSE.txt for full MIT license.
+# Copyright (c) 2021-present Lyuma <xn.lyuma@gmail.com> and contributors
+# SPDX-License-Identifier: MIT
+# Avatar export, first half: rig to VRM. Compiled by godot-sandbox's GDScript compiler
+# into a RISC-V guest (a .sgd file). It touches no files; the driver passes bytes in and writes the
+# bytes it gets back. export_package.sgd writes the .unitypackage from the T-posed VRM.
+#
+#   vrm_from_rig(glb, roles, meta) -> PackedByteArray
+#       A rigged GLB plus its humanoid roles (skintokens_humanoid_start's JSON) becomes a VRM 1.0.
+#   view_position(vrm) -> Vector3
+#       The eye point of a VRM, in source-asset space, for the avatar descriptor's view position.
+extends RefCounted
+
+const GLB_MAGIC := 0x46546C67
+const CHUNK_JSON := 0x4E4F534A
+const CHUNK_BIN := 0x004E4942
+
+# skintokens role -> VRM 1.0 humanBones name.
+const VRM_BONES := {
+	"hips": "hips",
+	"spine1": "spine",
+	"spine2": "chest",
+	"chest": "upperChest",
+	"neck": "neck",
+	"head": "head",
+	"left_shoulder": "leftShoulder",
+	"left_upper_arm": "leftUpperArm",
+	"left_forearm": "leftLowerArm",
+	"left_hand": "leftHand",
+	"right_shoulder": "rightShoulder",
+	"right_upper_arm": "rightUpperArm",
+	"right_forearm": "rightLowerArm",
+	"right_hand": "rightHand",
+	"left_upper_leg": "leftUpperLeg",
+	"left_shin": "leftLowerLeg",
+	"left_foot": "leftFoot",
+	"left_toe": "leftToes",
+	"right_upper_leg": "rightUpperLeg",
+	"right_shin": "rightLowerLeg",
+	"right_foot": "rightFoot",
+	"right_toe": "rightToes",
+}
+const REQUIRED := ["hips", "spine", "head", "leftUpperArm", "leftLowerArm", "leftHand",
+	"rightUpperArm", "rightLowerArm", "rightHand", "leftUpperLeg", "leftLowerLeg", "leftFoot",
+	"rightUpperLeg", "rightLowerLeg", "rightFoot"]
+
+
+# ---- GLB -----------------------------------------------------------------------------------
+
+func glb_json(glb: PackedByteArray) -> Dictionary:
+	if glb.size() < 20 or glb.decode_u32(0) != GLB_MAGIC or glb.decode_u32(16) != CHUNK_JSON:
+		return {}
+	var n: int = glb.decode_u32(12)
+	var parsed = JSON.parse_string(glb.slice(20, 20 + n).get_string_from_utf8())
+	if parsed is Dictionary:
+		return parsed
+	return {}
+
+
+func glb_bin(glb: PackedByteArray) -> PackedByteArray:
+	var n: int = glb.decode_u32(12)
+	var at: int = 20 + n
+	if at + 8 > glb.size() or glb.decode_u32(at + 4) != CHUNK_BIN:
+		return PackedByteArray()
+	var m: int = glb.decode_u32(at)
+	return glb.slice(at + 8, at + 8 + m)
+
+
+# Godot's JSON reads every number as a float and writes 1.0 back for 1, which glTF readers refuse
+# for indices; whole numbers go back to ints.
+func ints(v: Variant) -> Variant:
+	if v is Dictionary:
+		var d := {}
+		for k in v:
+			d[k] = ints(v[k])
+		return d
+	if v is Array:
+		var a := []
+		for x in v:
+			a.append(ints(x))
+		return a
+	if v is float and v == floorf(v) and absf(v) < 9007199254740992.0:
+		return int(v)
+	return v
+
+
+func pad4(b: PackedByteArray, fill: int) -> PackedByteArray:
+	while b.size() % 4 != 0:
+		b.append(fill)
+	return b
+
+
+func make_glb(json: Dictionary, bin: PackedByteArray) -> PackedByteArray:
+	var j := pad4(JSON.stringify(ints(json)).to_utf8_buffer(), 0x20)
+	var b := pad4(bin.duplicate(), 0)
+	var out := PackedByteArray()
+	out.resize(20)
+	out.encode_u32(0, GLB_MAGIC)
+	out.encode_u32(4, 2)
+	out.encode_u32(8, 12 + 8 + j.size() + (8 + b.size() if b.size() > 0 else 0))
+	out.encode_u32(12, j.size())
+	out.encode_u32(16, CHUNK_JSON)
+	out.append_array(j)
+	if b.size() > 0:
+		var h := PackedByteArray()
+		h.resize(8)
+		h.encode_u32(0, b.size())
+		h.encode_u32(4, CHUNK_BIN)
+		out.append_array(h)
+		out.append_array(b)
+	return out
+
+
+# ---- VRM 1.0 -------------------------------------------------------------------------------
+
+# meta: name, version, authors (Array), copyright, licence_url (the work's own licence) and the
+# permissions the licence grants. Returns an empty array with the reason in `last_error`.
+var last_error := ""
+
+
+func vrm_from_rig(glb: PackedByteArray, roles_json: String, meta: Dictionary) -> PackedByteArray:
+	last_error = ""
+	var gltf := glb_json(glb)
+	if gltf.is_empty():
+		last_error = "not a GLB"
+		return PackedByteArray()
+	var reply = JSON.parse_string(roles_json)
+	if not (reply is Dictionary) or reply.get("gates", "") != "pass":
+		last_error = "the rig did not pass the humanoid gates"
+		return PackedByteArray()
+	var roles: Dictionary = reply["roles"]
+	var by_name := {}
+	var nodes: Array = gltf.get("nodes", [])
+	for i in nodes.size():
+		by_name[str(nodes[i].get("name", ""))] = i
+	var bones := {}
+	for role in roles:
+		if not VRM_BONES.has(role):
+			continue
+		var joint := str(roles[role])
+		if not by_name.has(joint):
+			last_error = "role %s names %s, which is not a node" % [role, joint]
+			return PackedByteArray()
+		bones[VRM_BONES[role]] = {"node": by_name[joint]}
+	for need in REQUIRED:
+		if not bones.has(need):
+			last_error = "no joint for the required bone " + need
+			return PackedByteArray()
+	var authors: Array = meta.get("authors", [])
+	if authors.is_empty():
+		authors = ["Unknown"]
+	var m := {
+		"name": str(meta.get("name", "Avatar")),
+		"version": str(meta.get("version", "1.0")),
+		"authors": authors,
+		"licenseUrl": "https://vrm.dev/licenses/1.0/",
+		"avatarPermission": str(meta.get("avatar_permission", "onlyAuthor")),
+		"allowExcessivelyViolentUsage": false,
+		"allowExcessivelySexualUsage": false,
+		"commercialUsage": str(meta.get("commercial_usage", "personalNonProfit")),
+		"allowPoliticalOrReligiousUsage": false,
+		"allowAntisocialOrHateUsage": false,
+		"creditNotation": str(meta.get("credit_notation", "required")),
+		"allowRedistribution": bool(meta.get("allow_redistribution", false)),
+		"modification": str(meta.get("modification", "prohibited")),
+	}
+	if str(meta.get("copyright", "")) != "":
+		m["copyrightInformation"] = str(meta["copyright"])
+	if str(meta.get("licence_url", "")) != "":
+		m["otherLicenseUrl"] = str(meta["licence_url"])
+	# An avatar carries no clips, and the T-pose step refuses a file with any (the rig's RESET).
+	gltf.erase("animations")
+	var exts: Dictionary = gltf.get("extensions", {})
+	exts["VRMC_vrm"] = {"specVersion": "1.0", "meta": m, "humanoid": {"humanBones": bones}}
+	gltf["extensions"] = exts
+	var used: Array = gltf.get("extensionsUsed", [])
+	if not used.has("VRMC_vrm"):
+		used.append("VRMC_vrm")
+	gltf["extensionsUsed"] = used
+	return make_glb(gltf, glb_bin(glb))
+
+
+# ---- view position -------------------------------------------------------------------------
+
+func node_local(n: Dictionary) -> Transform3D:
+	if n.has("matrix"):
+		var a: Array = n["matrix"]
+		return Transform3D(Basis(Vector3(a[0], a[1], a[2]), Vector3(a[4], a[5], a[6]),
+			Vector3(a[8], a[9], a[10])), Vector3(a[12], a[13], a[14]))
+	var t: Array = n.get("translation", [0, 0, 0])
+	var r: Array = n.get("rotation", [0, 0, 0, 1])
+	var s: Array = n.get("scale", [1, 1, 1])
+	var b := Basis(Quaternion(r[0], r[1], r[2], r[3])).scaled(Vector3(s[0], s[1], s[2]))
+	return Transform3D(b, Vector3(t[0], t[1], t[2]))
+
+
+func node_globals(gltf: Dictionary) -> Array:
+	var nodes: Array = gltf["nodes"]
+	var parent := []
+	parent.resize(nodes.size())
+	parent.fill(-1)
+	for i in nodes.size():
+		for c in nodes[i].get("children", []):
+			parent[int(c)] = i
+	var out := []
+	for i in nodes.size():
+		var x := node_local(nodes[i])
+		var p: int = parent[i]
+		while p >= 0:
+			x = node_local(nodes[p]) * x
+			p = parent[p]
+		out.append(x)
+	return out
+
+
+func accessor_stride(gltf: Dictionary, acc: Dictionary) -> Array:
+	var view: Dictionary = gltf["bufferViews"][int(acc["bufferView"])]
+	var comp := {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
+	var count := {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
+	var elem: int = comp[int(acc["componentType"])] * count[str(acc["type"])]
+	var stride: int = int(view.get("byteStride", elem))
+	return [int(view.get("byteOffset", 0)) + int(acc.get("byteOffset", 0)), stride]
+
+
+func read_component(bin: PackedByteArray, at: int, ctype: int) -> float:
+	match ctype:
+		5126:
+			return bin.decode_float(at)
+		5121:
+			return float(bin.decode_u8(at))
+		5123:
+			return float(bin.decode_u16(at))
+		5125:
+			return float(bin.decode_u32(at))
+	return 0.0
+
+
+# The eye point: the head-weighted vertices of every skin, posed at rest; eyes sit 0.55 of the way
+# up their height, on the head's centre line, just behind the front of the face. Source-asset space is
+# glTF's with X mirrored.
+func view_position(vrm: PackedByteArray) -> Vector3:
+	var gltf := glb_json(vrm)
+	var bin := glb_bin(vrm)
+	var head_node: int = int(gltf["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["head"]["node"])
+	var g := node_globals(gltf)
+	var lo := Vector3(INF, INF, INF)
+	var hi := Vector3(-INF, -INF, -INF)
+	var found := 0
+	var nodes: Array = gltf["nodes"]
+	for ni in nodes.size():
+		var node: Dictionary = nodes[ni]
+		if not node.has("mesh") or not node.has("skin"):
+			continue
+		var skin: Dictionary = gltf["skins"][int(node["skin"])]
+		var joints: Array = skin["joints"]
+		var slot := joints.find(head_node)
+		if slot < 0:
+			continue
+		var ibm := Transform3D.IDENTITY
+		if skin.has("inverseBindMatrices"):
+			var ia: Dictionary = gltf["accessors"][int(skin["inverseBindMatrices"])]
+			var io: Array = accessor_stride(gltf, ia)
+			var at: int = io[0] + 64 * slot
+			var a := []
+			for k in 16:
+				a.append(bin.decode_float(at + 4 * k))
+			ibm = node_local({"matrix": a})
+		var to_world: Transform3D = g[head_node] * ibm
+		for prim in gltf["meshes"][int(node["mesh"])]["primitives"]:
+			var attrs: Dictionary = prim["attributes"]
+			if not attrs.has("JOINTS_0") or not attrs.has("WEIGHTS_0"):
+				continue
+			var pa: Dictionary = gltf["accessors"][int(attrs["POSITION"])]
+			var ja: Dictionary = gltf["accessors"][int(attrs["JOINTS_0"])]
+			var wa: Dictionary = gltf["accessors"][int(attrs["WEIGHTS_0"])]
+			var po: Array = accessor_stride(gltf, pa)
+			var jo: Array = accessor_stride(gltf, ja)
+			var wo: Array = accessor_stride(gltf, wa)
+			var jt: int = int(ja["componentType"])
+			var wt: int = int(wa["componentType"])
+			var jsize: int = 1 if jt == 5121 else 2
+			var wsize: int = 4 if wt == 5126 else (1 if wt == 5121 else 2)
+			var wscale: float = 1.0 if wt == 5126 else (255.0 if wt == 5121 else 65535.0)
+			for v in int(pa["count"]):
+				var best := -1
+				var best_w := 0.0
+				for k in 4:
+					var w: float = read_component(bin, wo[0] + v * wo[1] + k * wsize, wt) / wscale
+					if w > best_w:
+						best_w = w
+						best = int(read_component(bin, jo[0] + v * jo[1] + k * jsize, jt))
+				if best != slot or best_w < 0.5:
+					continue
+				var at: int = po[0] + v * po[1]
+				var p: Vector3 = to_world * Vector3(bin.decode_float(at), bin.decode_float(at + 4),
+					bin.decode_float(at + 8))
+				lo = lo.min(p)
+				hi = hi.max(p)
+				found += 1
+	if found == 0:
+		var h: Vector3 = g[head_node].origin
+		return Vector3(-h.x, h.y + 0.08, h.z + 0.08)
+	var head_x: float = g[head_node].origin.x
+	return Vector3(-head_x, lo.y + 0.55 * (hi.y - lo.y), hi.z - 0.02)
