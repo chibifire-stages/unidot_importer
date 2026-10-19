@@ -3,3 +3,5 @@ FBX2glTF*
 unity_asset_database.*res
 static_cache.*res
 static_storage.*res
+# Godot 4.4+ writes a .uid beside each script; this add-on does not track them.
+*.uid

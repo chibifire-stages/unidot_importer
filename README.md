@@ -84,6 +84,22 @@ Note that scripts and shaders will need to be ported by hand. However, it will b
 * PlayableDirector
 * Anything not listed above
 
+## Exporting avatars
+
+Unidot can also go the other way for avatars: `export_avatar.gd` turns a GLB model, rigged or not, into a `.unitypackage` holding a `.prefab` (with the avatar descriptor and its eye point set), one merged skinned Mesh, a humanoid Avatar and Standard-shader `.mat` files, all written as text YAML source assets. The target project needs only the avatar descriptor's SDK.
+
+The work runs as RISC-V guests in Godot Sandbox (`addons/godot_sandbox`, a double-precision build): `skintokens.elf` rigs and T-poses the model, and `export_vrm.sgd` and `export_package.sgd`, compiled by Godot Sandbox's GDScript compiler, write the VRM and the source assets. Rigging needs a local RenderingDevice, so run it in a window; `--rigged` and `--roles` skip it.
+
+```sh
+godot --path <project> --script res://addons/unidot_importer/export_avatar.gd -- \
+  --glb=in.glb --out=Name.unitypackage --name=Name \
+  --skintokens=skintokens.elf --weights=<SkinTokens GGUF dir> --keep=<work dir>
+godot --headless --path <project> --script res://addons/unidot_importer/export_avatar_check.gd -- \
+  --package=Name.unitypackage --vrm=<work dir>/Name.vrm --name=Name [--control]
+```
+
+`export_avatar_check.gd` reads the package back with Unidot's own package, meta, YAML and mesh code; with `--control` it must fail. The humanoid rules were measured from Avatars the editor builds, through its public API and the text assets it writes; `test/humanoid_mass` holds the one-joint-at-a-time centre-of-mass measurement and its solve.
+
 ## Troubleshooting
 
 * If an import fails, it is possible to view the logs of the most recently completed import.
