@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 # Avatar export, first half: rig to VRM. Compiled by godot-sandbox's GDScript compiler
 # into a RISC-V guest (a .sgd file). It touches no files; the driver passes bytes in and writes the
-# bytes it gets back. UnitypackageExport.sgd (thirdparty/unitypackage) writes the .unitypackage from
+# bytes it gets back. AssetPackageExport.sgd (thirdparty/asset_package) writes the asset package from
 # the T-posed VRM, and gives its view position.
 #
 #   vrm_from_rig(glb, roles, meta) -> PackedByteArray

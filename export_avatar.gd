@@ -10,14 +10,14 @@
 # addons/unidot_importer. Rigging runs skintokens.elf on a local RenderingDevice, so run it in a
 # window; with --rigged and --roles it is skipped and the run can be headless.
 # Steps: skintokens rig -> skintokens humanoid roles -> vrm_from_rig (.sgd) -> skintokens T-pose
-# -> view_position + native_package (thirdparty/unitypackage/UnitypackageExport.sgd, a git subtree
-# of entities-model-explorer's vsk_model_explorer/unitypackage, branch split/unitypackage-export).
+# -> view_position + native_package (thirdparty/asset_package/AssetPackageExport.sgd, a git subtree
+# of entities-model-explorer's vsk_model_explorer/asset_package, branch split/asset-package-export).
 # Materials use lilToon; this driver packs no lilToon, so the target project needs lilToon 2.x.
 extends SceneTree
 
 var EXPORT: String = get_script().resource_path.get_base_dir().path_join("export_vrm.sgd")
 var NATIVE: String = get_script().resource_path.get_base_dir().path_join(
-	"thirdparty/unitypackage/UnitypackageExport.sgd")
+	"thirdparty/asset_package/AssetPackageExport.sgd")
 const WAIT_GPU := 1
 const READ := 2
 const UPLOAD := 3
