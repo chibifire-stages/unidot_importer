@@ -10,11 +10,14 @@
 # addons/unidot_importer. Rigging runs skintokens.elf on a local RenderingDevice, so run it in a
 # window; with --rigged and --roles it is skipped and the run can be headless.
 # Steps: skintokens rig -> skintokens humanoid roles -> vrm_from_rig (.sgd) -> skintokens T-pose
-# -> view_position + native_package (export_package.sgd).
+# -> view_position + native_package (thirdparty/unitypackage/UnitypackageExport.sgd, a git subtree
+# of entities-model-explorer's vsk_model_explorer/unitypackage, branch split/unitypackage-export).
+# Materials use lilToon; this driver packs no lilToon, so the target project needs lilToon 2.x.
 extends SceneTree
 
 var EXPORT: String = get_script().resource_path.get_base_dir().path_join("export_vrm.sgd")
-var NATIVE: String = get_script().resource_path.get_base_dir().path_join("export_package.sgd")
+var NATIVE: String = get_script().resource_path.get_base_dir().path_join(
+	"thirdparty/unitypackage/UnitypackageExport.sgd")
 const WAIT_GPU := 1
 const READ := 2
 const UPLOAD := 3
@@ -94,14 +97,14 @@ func _run() -> void:
 	_write(vrm_path, vrm)
 	print("STEP tpose %s %d bytes" % [vrm_path, vrm.size()])
 
-	var view: Vector3 = ex.view_position(vrm)
-	print("STEP view ", view)
 	var native = load(NATIVE).new()
 	if not native.has_method("native_package"):
 		_quit("FAIL %s did not compile" % NATIVE)
 		return
+	var view: Vector3 = native.view_position(vrm)
+	print("STEP view ", view)
 	var t0 := Time.get_ticks_msec()
-	var pkg: PackedByteArray = native.native_package(vrm, _a.name, view, _credits(extras))
+	var pkg: PackedByteArray = native.native_package(vrm, _a.name, view, _credits(extras), PackedByteArray())
 	if pkg.is_empty():
 		_quit("FAIL native_package: " + str(native.last_error))
 		return

@@ -81,7 +81,7 @@ def study(path):
         print("  %-14s f = %.4f   k/(k+1) = %.4f" % (b, v, n / (n + 1)))
 
 
-# The rule export_package.sgd writes: centroid of the joint and its children, the hips on their
+# The rule UnitypackageExport.sgd writes: centroid of the joint and its children, the hips on their
 # children only, the left upper arm at 1/8.
 RULE = {b: 0.5 for b in ORDER if b not in END}
 RULE.update({"Hips": 1.0, "UpperChest": 0.75, "LeftUpperArm": 0.125})

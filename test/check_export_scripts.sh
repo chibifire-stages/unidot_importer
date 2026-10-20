@@ -15,7 +15,8 @@ mkdir -p "$WORK/addons"
 printf '[application]\nconfig/name="unidot export check"\n' > "$WORK/project.godot"
 cp -R "$ADDON" "$WORK/addons/unidot_importer"
 cd "$WORK/addons/unidot_importer"
-for s in export_vrm export_package; do cp "$s.sgd" "${s}_parsed.gd"; done
+cp export_vrm.sgd export_vrm_parsed.gd
+cp thirdparty/unitypackage/UnitypackageExport.sgd unitypackage_export_parsed.gd
 printf 'extends RefCounted\nfunc broken(:\n' > planted_broken.gd
 
 parse() {
@@ -24,7 +25,7 @@ parse() {
 }
 
 status=0
-for f in export_avatar.gd export_vrm_parsed.gd export_package_parsed.gd; do
+for f in export_avatar.gd export_vrm_parsed.gd unitypackage_export_parsed.gd; do
 	if parse "$f"; then echo "PASS $f"; else echo "FAIL $f"; cat "$WORK/log"; status=1; fi
 done
 if parse planted_broken.gd; then
