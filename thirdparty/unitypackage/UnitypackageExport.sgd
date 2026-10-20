@@ -1,16 +1,23 @@
 # This file is part of Unidot Importer. See LICENSE.txt for full MIT license.
 # Copyright (c) 2021-present Lyuma <xn.lyuma@gmail.com> and contributors
 # SPDX-License-Identifier: MIT
-# Avatar export, second half: a VRM 1.0 (T-posed, glTF space) becomes text YAML source assets in a
+# SkinTokens' .unitypackage export (AutoRig.gd runs it for every saved .vrm). This file is the one
+# copy: it came from the chibifire-stages/unidot_importer fork, whose export_avatar.gd consumes it as
+# a git subtree of this folder alone (branch split/unitypackage-export, `git subtree split --prefix=
+# vsk_model_explorer/unitypackage`), so keep this folder to this file.
+# A VRM 1.0 (T-posed, glTF space) becomes text YAML source assets in a
 # .unitypackage, so the target project needs nothing but the avatar descriptor's SDK:
 #   <Name>.prefab        GameObjects, Transforms, a SkinnedMeshRenderer, an Animator and a
 #                        avatar descriptor (text YAML)
 #   <Name>.mesh.asset    one Mesh: every skinned primitive merged, one submesh per material
 #   <Name>.avatar.asset  the humanoid Avatar, computed by the rules below
-#   Materials/*.mat      Standard-shader materials from the glTF PBR factors
+#   Materials/*.mat      lilToon materials from the glTF base colour and the MToon shading
+#   Assets/lilToon/      lilToon itself (MIT), when the caller passes the vendored members
 # The reverse of Unidot's readers: UnidotMesh (m_VertexData, m_IndexBuffer), UnidotAvatar
 # (m_HumanDescription), UnidotModelImporter (humanDescription), human_trait.gd (masses, names).
 # Compiled by godot-sandbox's GDScript compiler into a RISC-V guest; it reads and writes no files.
+#   view_position(vrm) -> Vector3
+#       The eye point of a VRM, in source-asset space, for the avatar descriptor's view position.
 extends RefCounted
 
 const GLB_MAGIC := 0x46546C67
@@ -18,7 +25,6 @@ const CHUNK_JSON := 0x4E4F534A
 const CHUNK_BIN := 0x004E4942
 const HEADER := "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n"
 const DESCRIPTOR_SCRIPT := "{fileID: 542108242, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}"
-const STANDARD_SHADER := "{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}"
 
 # Humanoid body bones, in the order of m_HumanBoneIndex and m_HumanBoneMass.
 const HUMAN_BONES := ["Hips", "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg", "LeftFoot",
@@ -341,9 +347,34 @@ func vec3_to_u32(v: PackedVector3Array) -> PackedByteArray:
 
 func tight(gltf: Dictionary, bin: PackedByteArray, index: int, ctype: int, comps: int, csize: int) -> PackedByteArray:
 	var info: Array = accessor_info(gltf, index)
-	if info[2] != ctype or info[3] != comps or info[1] != comps * csize:
+	if info[3] != comps:
 		return PackedByteArray()
-	return bin.slice(info[0], info[0] + info[4] * comps * csize)
+	if info[2] == ctype and info[1] == comps * csize:
+		return bin.slice(info[0], info[0] + info[4] * comps * csize)
+	# Other layouts are converted one component at a time: interleaved views, u8 joints (Godot's
+	# exporter writes them for skins under 256 joints) and normalized u8/u16 weights.
+	var src: int = info[2]
+	if src != 5126 and src != 5121 and src != 5123:
+		return PackedByteArray()
+	if ctype != 5126 and src == 5126:
+		return PackedByteArray()
+	var ssize: int = 4 if src == 5126 else (1 if src == 5121 else 2)
+	var scale: float = 1.0
+	if ctype == 5126 and src != 5126:
+		scale = 1.0 / (255.0 if src == 5121 else 65535.0)
+	var out := PackedByteArray()
+	out.resize(info[4] * comps * csize)
+	var o := 0
+	for v in int(info[4]):
+		var at: int = info[0] + v * info[1]
+		for k in comps:
+			var x: float = read(bin, at + k * ssize, src) * scale
+			if ctype == 5126:
+				out.encode_float(o, x)
+			else:
+				out.encode_u16(o, int(x))
+			o += csize
+	return out
 
 
 func build_mesh(gltf: Dictionary, bin: PackedByteArray, skin_index: int, nodes: Array, index_of: Dictionary,
@@ -506,14 +537,39 @@ func to_srgb(c: float) -> float:
 	return 1.055 * pow(c, 1.0 / 2.4) - 0.055
 
 
+# lilToon 2.3.4 shaders, by the glTF alphaMode: OPAQUE, MASK, BLEND. Each variant's own defaults
+# already carry that mode's blend, alpha-to-mask, render type and queue, so the material only
+# names the shader and sets _TransparentMode for lilToon's inspector.
+const LILTOON := {"OPAQUE": ["{fileID: 4800000, guid: df12117ecd77c31469c224178886498e, type: 3}", 0],
+	"MASK": ["{fileID: 4800000, guid: 85d6126cae43b6847aff4b13f4adb8ec, type: 3}", 1],
+	"BLEND": ["{fileID: 4800000, guid: 165365ab7100a044ca85fc8c33548a62, type: 3}", 2]}
+const LILTOON_VERSION := 45
+
+
+func color_yaml(c: Array, alpha: float) -> String:
+	return "{r: %s, g: %s, b: %s, a: %s}" % [f(to_srgb(c[0])), f(to_srgb(c[1])), f(to_srgb(c[2])), f(alpha)]
+
+
+# A lilToon material from the glTF PBR base colour and the VRMC_materials_mtoon shading.
+# MToon 1.0 shades by linearstep(-1 + toony, 1 - toony, N.L + shift); lilToon by a linear ramp over
+# _ShadowBorder -+ _ShadowBlur / 2 in half-Lambert (N.L * 0.5 + 0.5). The two are the same ramp when
+# _ShadowBorder = 0.5 - shift / 2 and _ShadowBlur = 1 - toony.
+# MToon's shadow is shadeColor * shadeMultiplyTexture; lilToon's (no _ShadowColorTex) is
+# albedo * _ShadowColor = baseTexture * baseColor * _ShadowColor. With the shade texture equal to the
+# base texture, or neither present, _ShadowColor = shadeColor / baseColor (linear) gives MToon's.
+# _ShadowBorderColor is black: MToon has no coloured band at the shadow edge.
 # tex_guid: GUID of the base colour texture asset, or "" for none.
 func material_yaml(m: Dictionary, tex_guid: String) -> String:
 	var pbr: Dictionary = m.get("pbrMetallicRoughness", {})
 	var c: Array = pbr.get("baseColorFactor", [1, 1, 1, 1])
-	var col := "{r: %s, g: %s, b: %s, a: %s}" % [f(to_srgb(c[0])), f(to_srgb(c[1])), f(to_srgb(c[2])), f(c[3])]
+	var mode: String = str(m.get("alphaMode", "OPAQUE"))
+	if not LILTOON.has(mode):
+		mode = "OPAQUE"
+	var mtoon: Dictionary = m.get("extensions", {}).get("VRMC_materials_mtoon", {})
 	var s := HEADER + "--- !u!21 &2100000\nMaterial:\n  serializedVersion: 8\n  m_ObjectHideFlags: 0\n"
 	s += "  m_CorrespondingSourceObject: {fileID: 0}\n  m_PrefabInstance: {fileID: 0}\n"
-	s += "  m_PrefabAsset: {fileID: 0}\n  m_Name: %s\n  m_Shader: %s\n" % [str(m.get("name", "Material")), STANDARD_SHADER]
+	s += "  m_PrefabAsset: {fileID: 0}\n  m_Name: %s\n  m_Shader: %s\n" % [str(m.get("name", "Material")),
+		LILTOON[mode][0]]
 	s += "  m_Parent: {fileID: 0}\n  m_ModifiedSerializedProperties: 0\n  m_ValidKeywords: []\n"
 	s += "  m_InvalidKeywords: []\n  m_LightmapFlags: 4\n  m_EnableInstancingVariants: 0\n"
 	s += "  m_DoubleSidedGI: 0\n  m_CustomRenderQueue: -1\n  stringTagMap: {}\n  disabledShaderPasses: []\n"
@@ -523,10 +579,25 @@ func material_yaml(m: Dictionary, tex_guid: String) -> String:
 	else:
 		s += ("    m_TexEnvs:\n    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: %s, type: 3}\n"
 			+ "        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n") % tex_guid
-	s += "    m_Ints: []\n    m_Floats:\n    - _Glossiness: %s\n    - _Metallic: %s\n" % [
-		f(1.0 - float(pbr.get("roughnessFactor", 1.0))), f(float(pbr.get("metallicFactor", 1.0)))]
-	s += "    - _Mode: 0\n    - _SrcBlend: 1\n    - _DstBlend: 0\n    - _ZWrite: 1\n"
-	s += "    m_Colors:\n    - _Color: %s\n    - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}\n" % col
+	s += "    m_Ints: []\n    m_Floats:\n"
+	s += "    - _lilToonVersion: %d\n    - _TransparentMode: %d\n" % [LILTOON_VERSION, LILTOON[mode][1]]
+	s += "    - _Cull: %d\n" % (0 if bool(m.get("doubleSided", false)) else 2)
+	s += "    - _Cutoff: %s\n" % f(float(m.get("alphaCutoff", 0.5)))
+	var shadow := ""
+	if not mtoon.is_empty():
+		var shift := float(mtoon.get("shadingShiftFactor", 0.0))
+		var toony := float(mtoon.get("shadingToonyFactor", 0.9))
+		s += "    - _UseShadow: 1\n    - _ShadowStrength: 1\n    - _ShadowBorderRange: 0\n"
+		s += "    - _ShadowBorder: %s\n    - _ShadowBlur: %s\n" % [f(clampf(0.5 - shift * 0.5, 0.0, 1.0)),
+			f(clampf(1.0 - toony, 0.0, 1.0))]
+		var shade: Array = mtoon.get("shadeColorFactor", [0, 0, 0])
+		var ratio := []
+		for k in 3:
+			var b := float(c[k])
+			ratio.append(clampf(float(shade[k]) / b, 0.0, 1.0) if b > 0.0 else float(shade[k]))
+		shadow = "    - _ShadowColor: %s\n    - _ShadowBorderColor: {r: 0, g: 0, b: 0, a: 1}\n" % color_yaml(
+			ratio, 1.0)
+	s += "    m_Colors:\n    - _Color: %s\n" % color_yaml(c, float(c[3])) + shadow
 	s += "  m_BuildTextureStacks: []\n"
 	return s
 
@@ -884,29 +955,44 @@ func folder_meta(guid: String) -> String:
 
 
 func add(tar: PackedByteArray, path: String, data: PackedByteArray, meta: String, folder: bool) -> void:
-	var g := guid_for(path)
-	tar.append_array(tar_member(g + "/", PackedByteArray(), true))
+	tar.append_array(members(guid_for(path), path, data, meta, folder))
+
+
+# The tar members of one package asset: <guid>/, <guid>/asset (not for a folder), <guid>/asset.meta
+# and <guid>/pathname. tools/liltoon_pack.gd calls this too, with lilToon's own GUIDs.
+func members(g: String, path: String, data: PackedByteArray, meta: String, folder: bool) -> PackedByteArray:
+	var out := tar_member(g + "/", PackedByteArray(), true)
 	if not folder:
-		tar.append_array(tar_member(g + "/asset", data, false))
-	tar.append_array(tar_member(g + "/asset.meta", meta.to_utf8_buffer(), false))
-	tar.append_array(tar_member(g + "/pathname", path.to_utf8_buffer(), false))
+		out.append_array(tar_member(g + "/asset", data, false))
+	out.append_array(tar_member(g + "/asset.meta", meta.to_utf8_buffer(), false))
+	out.append_array(tar_member(g + "/pathname", path.to_utf8_buffer(), false))
+	return out
 
 
-# vrm: a T-posed VRM 1.0. Returns the .unitypackage bytes, or nothing with `last_error` set.
-func native_package(vrm: PackedByteArray, name: String, view: Vector3, credits: String) -> PackedByteArray:
+# vrm: a T-posed VRM 1.0. vendored: tar members appended as they are (liltoon.tar from
+# tools/liltoon_pack.gd: lilToon at Assets/lilToon with its own GUIDs), or empty. Returns the
+# .unitypackage bytes, or nothing with `last_error` set.
+func native_package(vrm: PackedByteArray, name: String, view: Vector3, credits: String,
+		vendored: PackedByteArray) -> PackedByteArray:
 	last_error = ""
 	var gltf := glb_json(vrm)
 	var bin := glb_bin(vrm)
 	if gltf.is_empty() or not gltf.get("extensions", {}).has("VRMC_vrm"):
 		last_error = "not a VRM 1.0"
 		return PackedByteArray()
+	# Godot's exporter gives each skinned mesh its own skin; skins over the same joints count as one
+	# skin here, so every such mesh goes into the one Mesh.
 	var skin_index := -1
 	for node in gltf["nodes"]:
 		if node.has("mesh") and node.has("skin"):
-			if skin_index >= 0 and int(node["skin"]) != skin_index:
-				last_error = "more than one skin"
-				return PackedByteArray()
-			skin_index = int(node["skin"])
+			var s := int(node["skin"])
+			if skin_index < 0:
+				skin_index = s
+			elif s != skin_index:
+				if gltf["skins"][s]["joints"] != gltf["skins"][skin_index]["joints"]:
+					last_error = "more than one skin"
+					return PackedByteArray()
+				node["skin"] = skin_index
 	if skin_index < 0:
 		last_error = "no skinned mesh"
 		return PackedByteArray()
@@ -979,7 +1065,119 @@ func native_package(vrm: PackedByteArray, name: String, view: Vector3, credits: 
 		importer_meta(guid_for(paths["prefab"]), "PrefabImporter", 0), false)
 	add(tar, dir + "/CREDITS.txt", credits.to_utf8_buffer(),
 		importer_meta(guid_for(dir + "/CREDITS.txt"), "TextScriptImporter", 0), false)
+	tar.append_array(vendored)
 	var end := PackedByteArray()
 	end.resize(1024)
 	tar.append_array(end)
 	return tar.compress(FileAccess.COMPRESSION_GZIP)
+
+# ---- view position --------------------------------------------------------------------------
+
+# The eye point: the head-weighted vertices of every skin, posed at rest; eyes sit 0.55 of the way
+# up their height, on the head's centre line, just behind the front of the face. Source-asset space is
+# glTF's with X mirrored.
+func view_position(vrm: PackedByteArray) -> Vector3:
+	var gltf := glb_json(vrm)
+	var bin := glb_bin(vrm)
+	var head_node: int = int(gltf["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["head"]["node"])
+	var g := node_globals(gltf)
+	var lo := Vector3(INF, INF, INF)
+	var hi := Vector3(-INF, -INF, -INF)
+	var found := 0
+	var nodes: Array = gltf["nodes"]
+	for ni in nodes.size():
+		var node: Dictionary = nodes[ni]
+		if not node.has("mesh") or not node.has("skin"):
+			continue
+		var skin: Dictionary = gltf["skins"][int(node["skin"])]
+		var joints: Array = skin["joints"]
+		var slot := joints.find(head_node)
+		if slot < 0:
+			continue
+		var ibm := Transform3D.IDENTITY
+		if skin.has("inverseBindMatrices"):
+			var ia: Dictionary = gltf["accessors"][int(skin["inverseBindMatrices"])]
+			var io: Array = accessor_stride(gltf, ia)
+			var at: int = io[0] + 64 * slot
+			var a := []
+			for k in 16:
+				a.append(bin.decode_float(at + 4 * k))
+			ibm = node_local({"matrix": a})
+		var to_world: Transform3D = g[head_node] * ibm
+		for prim in gltf["meshes"][int(node["mesh"])]["primitives"]:
+			var attrs: Dictionary = prim["attributes"]
+			if not attrs.has("JOINTS_0") or not attrs.has("WEIGHTS_0"):
+				continue
+			var pa: Dictionary = gltf["accessors"][int(attrs["POSITION"])]
+			var ja: Dictionary = gltf["accessors"][int(attrs["JOINTS_0"])]
+			var wa: Dictionary = gltf["accessors"][int(attrs["WEIGHTS_0"])]
+			var po: Array = accessor_stride(gltf, pa)
+			var jo: Array = accessor_stride(gltf, ja)
+			var wo: Array = accessor_stride(gltf, wa)
+			var jt: int = int(ja["componentType"])
+			var wt: int = int(wa["componentType"])
+			var jsize: int = 1 if jt == 5121 else 2
+			var wsize: int = 4 if wt == 5126 else (1 if wt == 5121 else 2)
+			var wscale: float = 1.0 if wt == 5126 else (255.0 if wt == 5121 else 65535.0)
+			for v in int(pa["count"]):
+				var best := -1
+				var best_w := 0.0
+				for k in 4:
+					var w: float = read_component(bin, wo[0] + v * wo[1] + k * wsize, wt) / wscale
+					if w > best_w:
+						best_w = w
+						best = int(read_component(bin, jo[0] + v * jo[1] + k * jsize, jt))
+				if best != slot or best_w < 0.5:
+					continue
+				var at: int = po[0] + v * po[1]
+				var p: Vector3 = to_world * Vector3(bin.decode_float(at), bin.decode_float(at + 4),
+					bin.decode_float(at + 8))
+				lo = lo.min(p)
+				hi = hi.max(p)
+				found += 1
+	if found == 0:
+		var h: Vector3 = g[head_node].origin
+		return Vector3(-h.x, h.y + 0.08, h.z + 0.08)
+	var head_x: float = g[head_node].origin.x
+	return Vector3(-head_x, lo.y + 0.55 * (hi.y - lo.y), hi.z - 0.02)
+
+
+func node_globals(gltf: Dictionary) -> Array:
+	var nodes: Array = gltf["nodes"]
+	var parent := []
+	parent.resize(nodes.size())
+	parent.fill(-1)
+	for i in nodes.size():
+		for c in nodes[i].get("children", []):
+			parent[int(c)] = i
+	var out := []
+	for i in nodes.size():
+		var x := node_local(nodes[i])
+		var p: int = parent[i]
+		while p >= 0:
+			x = node_local(nodes[p]) * x
+			p = parent[p]
+		out.append(x)
+	return out
+
+
+func accessor_stride(gltf: Dictionary, acc: Dictionary) -> Array:
+	var view: Dictionary = gltf["bufferViews"][int(acc["bufferView"])]
+	var comp := {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
+	var count := {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
+	var elem: int = comp[int(acc["componentType"])] * count[str(acc["type"])]
+	var stride: int = int(view.get("byteStride", elem))
+	return [int(view.get("byteOffset", 0)) + int(acc.get("byteOffset", 0)), stride]
+
+
+func read_component(bin: PackedByteArray, at: int, ctype: int) -> float:
+	match ctype:
+		5126:
+			return bin.decode_float(at)
+		5121:
+			return float(bin.decode_u8(at))
+		5123:
+			return float(bin.decode_u16(at))
+		5125:
+			return float(bin.decode_u32(at))
+	return 0.0

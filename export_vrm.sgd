@@ -3,12 +3,11 @@
 # SPDX-License-Identifier: MIT
 # Avatar export, first half: rig to VRM. Compiled by godot-sandbox's GDScript compiler
 # into a RISC-V guest (a .sgd file). It touches no files; the driver passes bytes in and writes the
-# bytes it gets back. export_package.sgd writes the .unitypackage from the T-posed VRM.
+# bytes it gets back. UnitypackageExport.sgd (thirdparty/unitypackage) writes the .unitypackage from
+# the T-posed VRM, and gives its view position.
 #
 #   vrm_from_rig(glb, roles, meta) -> PackedByteArray
 #       A rigged GLB plus its humanoid roles (skintokens_humanoid_start's JSON) becomes a VRM 1.0.
-#   view_position(vrm) -> Vector3
-#       The eye point of a VRM, in source-asset space, for the avatar descriptor's view position.
 extends RefCounted
 
 const GLB_MAGIC := 0x46546C67
@@ -223,113 +222,3 @@ func node_local(n: Dictionary) -> Transform3D:
 	var s: Array = n.get("scale", [1, 1, 1])
 	var b := Basis(Quaternion(r[0], r[1], r[2], r[3])).scaled(Vector3(s[0], s[1], s[2]))
 	return Transform3D(b, Vector3(t[0], t[1], t[2]))
-
-
-func node_globals(gltf: Dictionary) -> Array:
-	var nodes: Array = gltf["nodes"]
-	var parent := []
-	parent.resize(nodes.size())
-	parent.fill(-1)
-	for i in nodes.size():
-		for c in nodes[i].get("children", []):
-			parent[int(c)] = i
-	var out := []
-	for i in nodes.size():
-		var x := node_local(nodes[i])
-		var p: int = parent[i]
-		while p >= 0:
-			x = node_local(nodes[p]) * x
-			p = parent[p]
-		out.append(x)
-	return out
-
-
-func accessor_stride(gltf: Dictionary, acc: Dictionary) -> Array:
-	var view: Dictionary = gltf["bufferViews"][int(acc["bufferView"])]
-	var comp := {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
-	var count := {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
-	var elem: int = comp[int(acc["componentType"])] * count[str(acc["type"])]
-	var stride: int = int(view.get("byteStride", elem))
-	return [int(view.get("byteOffset", 0)) + int(acc.get("byteOffset", 0)), stride]
-
-
-func read_component(bin: PackedByteArray, at: int, ctype: int) -> float:
-	match ctype:
-		5126:
-			return bin.decode_float(at)
-		5121:
-			return float(bin.decode_u8(at))
-		5123:
-			return float(bin.decode_u16(at))
-		5125:
-			return float(bin.decode_u32(at))
-	return 0.0
-
-
-# The eye point: the head-weighted vertices of every skin, posed at rest; eyes sit 0.55 of the way
-# up their height, on the head's centre line, just behind the front of the face. Source-asset space is
-# glTF's with X mirrored.
-func view_position(vrm: PackedByteArray) -> Vector3:
-	var gltf := glb_json(vrm)
-	var bin := glb_bin(vrm)
-	var head_node: int = int(gltf["extensions"]["VRMC_vrm"]["humanoid"]["humanBones"]["head"]["node"])
-	var g := node_globals(gltf)
-	var lo := Vector3(INF, INF, INF)
-	var hi := Vector3(-INF, -INF, -INF)
-	var found := 0
-	var nodes: Array = gltf["nodes"]
-	for ni in nodes.size():
-		var node: Dictionary = nodes[ni]
-		if not node.has("mesh") or not node.has("skin"):
-			continue
-		var skin: Dictionary = gltf["skins"][int(node["skin"])]
-		var joints: Array = skin["joints"]
-		var slot := joints.find(head_node)
-		if slot < 0:
-			continue
-		var ibm := Transform3D.IDENTITY
-		if skin.has("inverseBindMatrices"):
-			var ia: Dictionary = gltf["accessors"][int(skin["inverseBindMatrices"])]
-			var io: Array = accessor_stride(gltf, ia)
-			var at: int = io[0] + 64 * slot
-			var a := []
-			for k in 16:
-				a.append(bin.decode_float(at + 4 * k))
-			ibm = node_local({"matrix": a})
-		var to_world: Transform3D = g[head_node] * ibm
-		for prim in gltf["meshes"][int(node["mesh"])]["primitives"]:
-			var attrs: Dictionary = prim["attributes"]
-			if not attrs.has("JOINTS_0") or not attrs.has("WEIGHTS_0"):
-				continue
-			var pa: Dictionary = gltf["accessors"][int(attrs["POSITION"])]
-			var ja: Dictionary = gltf["accessors"][int(attrs["JOINTS_0"])]
-			var wa: Dictionary = gltf["accessors"][int(attrs["WEIGHTS_0"])]
-			var po: Array = accessor_stride(gltf, pa)
-			var jo: Array = accessor_stride(gltf, ja)
-			var wo: Array = accessor_stride(gltf, wa)
-			var jt: int = int(ja["componentType"])
-			var wt: int = int(wa["componentType"])
-			var jsize: int = 1 if jt == 5121 else 2
-			var wsize: int = 4 if wt == 5126 else (1 if wt == 5121 else 2)
-			var wscale: float = 1.0 if wt == 5126 else (255.0 if wt == 5121 else 65535.0)
-			for v in int(pa["count"]):
-				var best := -1
-				var best_w := 0.0
-				for k in 4:
-					var w: float = read_component(bin, wo[0] + v * wo[1] + k * wsize, wt) / wscale
-					if w > best_w:
-						best_w = w
-						best = int(read_component(bin, jo[0] + v * jo[1] + k * jsize, jt))
-				if best != slot or best_w < 0.5:
-					continue
-				var at: int = po[0] + v * po[1]
-				var p: Vector3 = to_world * Vector3(bin.decode_float(at), bin.decode_float(at + 4),
-					bin.decode_float(at + 8))
-				lo = lo.min(p)
-				hi = hi.max(p)
-				found += 1
-	if found == 0:
-		var h: Vector3 = g[head_node].origin
-		return Vector3(-h.x, h.y + 0.08, h.z + 0.08)
-	var head_x: float = g[head_node].origin.x
-	return Vector3(-head_x, lo.y + 0.55 * (hi.y - lo.y), hi.z - 0.02)
